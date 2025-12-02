@@ -19,12 +19,16 @@ function main() {
       // 获取用户输入的内容
       const app = formData.get("app");
       const domain = formData.get("domain");
-      const data = { app, domain };
+      const prefixes = formData.get("prefixes");
+      const data = { app, domain, prefixes };
       if (!data.app) {
         return toggleError("请输入飞书命名空间");
       }
       if (!data.domain) {
         return toggleError("请输入 Gitlab 地址");
+      }
+      if (prefixes && !/^[a-zA-Z0-9]+(,[a-zA-Z0-9]+)*$/.test(prefixes.trim())) {
+        return toggleError("项目 ID 前缀格式不正确，请使用字母、数字，多个前缀用逗号分隔");
       }
       toggleError();
       await setLarkConfig(data);

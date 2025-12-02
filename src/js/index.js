@@ -30,12 +30,94 @@ async function main() {
           error: data.error,
           data: data.data,
         });
+
+        // 如果返回了实际的类型信息，更新所有该 tid 的链接
+        if (data.actualType) {
+          updateLinksWithCorrectType(data.tid, data.actualType);
+        }
         break;
     }
   });
 
+  // 更新链接为正确的类型
+  function updateLinksWithCorrectType(tid, actualType) {
+    const LarkConfig = getLarkConfigSync();
+    if (!LarkConfig) return;
+
+    const links = document.querySelectorAll(`a[data-tid="${tid}"]`);
+
+    links.forEach(link => {
+      const projectId = tid.split("-")[1];
+      const url = getLarkProjectLink(projectId, actualType);
+      if (link.href !== url) {
+        link.href = url;
+      }
+    });
+  }
+
   initPopover();
   initPageListener();
+
+  // 全局扫描：处理页面上所有现有的 GFM 链接
+  function scanAllGfmLinks() {
+    const allGfmLinks = document.querySelectorAll('a.gfm.gfm-issue');
+
+    allGfmLinks.forEach(link => {
+      if (link.classList.contains('lark-project-link')) {
+        return;
+      }
+
+      const LarkConfig = getLarkConfigSync();
+      if (!LarkConfig) return;
+
+      const prefixes = LarkConfig?.prefixes || "m,f";
+      const prefixList = prefixes.split(",").map(p => p.trim().toLowerCase()).filter(p => p);
+      const text = link.textContent.trim();
+      // 要求数字部分至少7位数
+      const match = text.match(new RegExp(`(${prefixList.join("|")})-\\d{7,}`, "i"));
+
+      if (match) {
+        const tid = match[0];
+        const projectId = tid.split("-")[1];
+        const prefix = tid.split("-")[0].toLowerCase();
+
+        let type = "story";
+        if (prefix === "m") {
+          type = "story";
+        } else if (prefix === "f") {
+          type = "issue";
+        }
+
+        const url = getLarkProjectLink(projectId, type);
+
+        // 这些是独立的 issue 链接，整个链接都应该指向飞书
+        link.href = url;
+        link.target = "_blank";
+        link.classList.add('lark-project-link');
+        link.dataset.tid = tid;
+
+        fetchLarkProjectInfo({
+          tid: tid,
+          app: LarkConfig.app,
+        });
+
+        bindPopoverEvent(link);
+      }
+    });
+  }
+
+  // 立即执行一次全局扫描
+  scanAllGfmLinks();
+
+  // 页面变化时重新扫描
+  const observer = new MutationObserver(() => {
+    scanAllGfmLinks();
+  });
+
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
 
   // 初始化 popover 节点
   function initPopover() {
@@ -94,8 +176,12 @@ async function main() {
         const dom_project_last_commit = dom_tree_holder.querySelector(
           ".project-last-commit"
         );
-        const ro = new ResizeObserver(replaceTreeHolderProjectLastCommit);
-        ro.observe(dom_project_last_commit.firstChild);
+        // 使用 firstElementChild 确保获取的是 Element 而不是文本节点
+        const targetElement = dom_project_last_commit?.firstElementChild || dom_project_last_commit;
+        if (targetElement && targetElement instanceof Element) {
+          const ro = new ResizeObserver(replaceTreeHolderProjectLastCommit);
+          ro.observe(targetElement);
+        }
       }
 
       const dom_content_body = document.getElementById("content-body");
@@ -145,22 +231,26 @@ async function main() {
   }
 
   // 获取 Lark 项目链接
-  function getLarkProjectLink(projectId, type = "m") {
+  function getLarkProjectLink(projectId, type = "story") {
     const LarkConfig = getLarkConfigSync();
-    if (type === "f")
+    if (type === "issue")
       return `${LARK_DOMAIN_HOST}/${LarkConfig.app}/issue/detail/${projectId}`;
     return `${LARK_DOMAIN_HOST}/${LarkConfig.app}/story/detail/${projectId}`;
   }
 
   function fetchLarkProjectInfo(data) {
     const { app, tid } = data;
-    if (cacheMap.has(tid) && cacheMap.get(tid).locker) return;
+
+    if (cacheMap.has(tid) && cacheMap.get(tid).locker) {
+      return;
+    }
 
     cacheMap.set(tid, {
       locker: true,
       error: false,
       data: null,
     });
+
     chrome.runtime.sendMessage({
       message: MSG_EVENT.GET_LARK_PROJECT_INFO,
       data: {
@@ -170,25 +260,112 @@ async function main() {
     });
   }
 
-  // 替换项目 ID 为 Lark 项目链接
-  function replaceProjectIdToLarkProjectLink(dom, className) {
-    const reg = /(m|f)-\d+/g;
-    let isFind = false;
-    const content = dom.innerHTML.replace(reg, ($1) => {
-      const projectId = $1.split("-")[1];
-      const type = $1.split("-")[0];
-      isFind = true;
-      const LarkConfig = getLarkConfigSync();
-      const url = getLarkProjectLink(projectId, type);
-      if ($1) {
+  // 新方法：处理 GitLab 自动生成的 issue 链接
+  function replaceLarkLinks(dom) {
+    const LarkConfig = getLarkConfigSync();
+    if (!LarkConfig) {
+      return false;
+    }
+
+    // 获取配置的前缀，默认为 m,f
+    const prefixes = LarkConfig?.prefixes || "m,f";
+    const prefixList = prefixes.split(",").map(p => p.trim().toLowerCase()).filter(p => p);
+    // 要求数字部分至少7位数
+    const reg = new RegExp(`^(${prefixList.join("|")})-\\d{7,}$`, "i");
+
+
+    let hasReplaced = false;
+    let issueLinks = [];
+
+    // 只处理 GitLab 自动生成的独立 issue 链接（.gfm.gfm-issue）
+    if (dom.tagName === 'A' && (dom.classList.contains('gfm-issue') || dom.classList.contains('gfm'))) {
+      issueLinks = [dom];
+    } else {
+      // 在容器内查找 GitLab 自动生成的 issue 链接
+      issueLinks = dom.querySelectorAll('a.gfm.gfm-issue, a.gfm-issue');
+    }
+
+
+    Array.from(issueLinks).forEach(link => {
+      const text = link.textContent.trim();
+
+      // 检查链接文本是否包含前缀模式（数字至少7位）
+      const match = text.match(new RegExp(`(${prefixList.join("|")})-\\d{7,}`, "i"));
+
+      if (match) {
+        const tid = match[0];
+        const projectId = tid.split("-")[1];
+        const prefix = tid.split("-")[0].toLowerCase();
+
+
+        // 保持向后兼容：m->story, f->issue
+        let type = "story";
+        if (prefix === "m") {
+          type = "story";
+        } else if (prefix === "f") {
+          type = "issue";
+        }
+
+        // 替换链接的 href 为飞书链接
+        const url = getLarkProjectLink(projectId, type);
+
+        const oldHref = link.href;
+        link.href = url;
+        link.target = "_blank";
+        link.classList.add('lark-project-link');
+        link.dataset.tid = tid;
+
+
+        // 获取飞书项目信息
         fetchLarkProjectInfo({
-          tid: $1,
+          tid: tid,
           app: LarkConfig.app,
         });
+
+        // 绑定 popover 事件
+        bindPopoverEvent(link);
+        hasReplaced = true;
       }
-      return `<a class='lark-project-link ${
-        className ? className : ""
-      }' href='${url}' target='_blank' data-tid="${$1}" >${$1}</a>`;
+    });
+
+    return hasReplaced;
+  }
+
+  // 旧方法：替换纯文本中的项目 ID 为 Lark 项目链接（向后兼容）
+  function replaceProjectIdToLarkProjectLink(dom, className) {
+    const LarkConfig = getLarkConfigSync();
+    // 获取配置的前缀，默认为 m,f
+    const prefixes = LarkConfig?.prefixes || "m,f";
+    const prefixList = prefixes.split(",").map(p => p.trim().toLowerCase()).filter(p => p);
+    // 要求数字部分至少7位数，匹配带 # 号的格式
+    const reg = new RegExp(`#(${prefixList.join("|")})-\\d{7,}`, "gi");
+
+    let isFind = false;
+    const content = dom.innerHTML.replace(reg, ($0, $1) => {
+      // $0 是完整匹配（包含 #），$1 是括号中的前缀部分
+      const fullMatch = $0; // 如 #TAP-6478178330
+      const tid = fullMatch.substring(1); // 移除 # 号，得到 TAP-6478178330
+      const projectId = tid.split("-")[1];
+      const prefix = tid.split("-")[0].toLowerCase();
+      isFind = true;
+
+      // 保持向后兼容：m->story, f->issue
+      let type = "story";
+      if (prefix === "m") {
+        type = "story";
+      } else if (prefix === "f") {
+        type = "issue";
+      }
+      // 对于其他前缀，默认使用 story，后端会动态判断
+
+      const url = getLarkProjectLink(projectId, type);
+      fetchLarkProjectInfo({
+        tid: tid,
+        app: LarkConfig.app,
+      });
+      // 只替换 #TAP-xxx 部分为飞书链接
+      return `<a class='lark-project-link ${className ? className : ""
+        }' href='${url}' target='_blank' data-tid="${tid}" >${fullMatch}</a>`;
     });
     return [isFind, content];
   }
@@ -202,18 +379,31 @@ async function main() {
       const dom_commit_list_item =
         dom_commit_list.getElementsByClassName("commit");
       Array.from(dom_commit_list_item).forEach((row) => {
-        const dom_commit_row_message =
-          row.getElementsByClassName("commit-row-message")[0];
-        if (nodeMap.has(dom_commit_row_message)) return;
-        const result = replaceProjectIdToLarkProjectLink(
-          dom_commit_row_message
-        );
-        if (result[0]) {
-          nodeMap.set(dom_commit_row_message, true);
-          dom_commit_row_message.innerHTML = result[1];
-          const link =
-            dom_commit_row_message.querySelector(".lark-project-link");
-          bindPopoverEvent(link);
+        if (nodeMap.has(row)) return;
+
+        // 在整个 commit row 中查找链接（而不是只在第一个链接中查找）
+        let hasReplaced = replaceLarkLinks(row);
+
+        // 如果没有找到链接，尝试旧方法处理纯文本（向后兼容）
+        if (!hasReplaced) {
+          const dom_commit_row_message =
+            row.getElementsByClassName("commit-row-message")[0];
+          if (dom_commit_row_message) {
+            const result = replaceProjectIdToLarkProjectLink(
+              dom_commit_row_message
+            );
+            if (result[0]) {
+              dom_commit_row_message.innerHTML = result[1];
+              const link =
+                dom_commit_row_message.querySelector(".lark-project-link");
+              bindPopoverEvent(link);
+              hasReplaced = true;
+            }
+          }
+        }
+
+        if (hasReplaced) {
+          nodeMap.set(row, true);
         }
       });
     });
@@ -222,34 +412,62 @@ async function main() {
   // 替换项目 ID 为 Lark 项目链接
   function replaceTreeHolderProjectLastCommit() {
     const dom_tree_holder = document.getElementById("tree-holder");
+    if (!dom_tree_holder) return;
     const dom_project_last_commit = dom_tree_holder.querySelector(
       ".project-last-commit"
     );
-    const dom_commit_row_message = dom_project_last_commit.querySelector(
-      ".commit-row-message"
-    );
-    if (nodeMap.has(dom_commit_row_message) || !dom_commit_row_message) return;
-    const result = replaceProjectIdToLarkProjectLink(dom_commit_row_message);
-    if (result[0]) {
-      nodeMap.set(dom_commit_row_message, true);
-      dom_commit_row_message.innerHTML = result[1];
-      const link = dom_commit_row_message.querySelector(".lark-project-link");
-      bindPopoverEvent(link);
+    if (!dom_project_last_commit) return;
+    if (nodeMap.has(dom_project_last_commit)) return;
+
+    // 在整个 project-last-commit 容器中查找链接
+    let hasReplaced = replaceLarkLinks(dom_project_last_commit);
+
+    // 如果没有找到链接，尝试旧方法处理纯文本（向后兼容）
+    if (!hasReplaced) {
+      const dom_commit_row_message = dom_project_last_commit.querySelector(
+        ".commit-row-message"
+      );
+      if (dom_commit_row_message) {
+        const result = replaceProjectIdToLarkProjectLink(dom_commit_row_message);
+        if (result[0]) {
+          dom_commit_row_message.innerHTML = result[1];
+          const link = dom_commit_row_message.querySelector(".lark-project-link");
+          bindPopoverEvent(link);
+          hasReplaced = true;
+        }
+      }
+    }
+
+    if (hasReplaced) {
+      nodeMap.set(dom_project_last_commit, true);
     }
   }
 
   // 替换内容区域的 commit list
   function replaceContentBodyCommitList() {
+    // 注意：.merge-request-title-text 在新版 GitLab 中可能不存在
+    // 这里保留旧逻辑以兼容旧版本
     const rows = document.getElementsByClassName("merge-request-title-text");
     Array.from(rows).forEach((item) => {
       const dom_a = item.querySelector("a");
       if (nodeMap.has(dom_a)) return;
-      const result = replaceProjectIdToLarkProjectLink(dom_a);
-      if (result[0]) {
+
+      // 优先使用新方法处理已存在的链接
+      let hasReplaced = replaceLarkLinks(dom_a);
+
+      // 如果没有找到链接，尝试旧方法处理纯文本（向后兼容）
+      if (!hasReplaced) {
+        const result = replaceProjectIdToLarkProjectLink(dom_a);
+        if (result[0]) {
+          dom_a.innerHTML = result[1];
+          const link = dom_a.querySelector(".lark-project-link");
+          bindPopoverEvent(link);
+          hasReplaced = true;
+        }
+      }
+
+      if (hasReplaced) {
         nodeMap.set(dom_a, true);
-        dom_a.innerHTML = result[1];
-        const link = dom_a.querySelector(".lark-project-link");
-        bindPopoverEvent(link);
       }
     });
   }
@@ -264,12 +482,23 @@ async function main() {
       dom_merge_request_details.querySelector(".title");
     if (!dom_merge_request_title) return;
     if (nodeMap.has(dom_merge_request_title)) return;
-    const result = replaceProjectIdToLarkProjectLink(dom_merge_request_title);
-    if (result[0]) {
+
+    // 在标题容器中查找所有链接
+    let hasReplaced = replaceLarkLinks(dom_merge_request_title);
+
+    // 如果没有找到链接，尝试旧方法处理纯文本（向后兼容）
+    if (!hasReplaced) {
+      const result = replaceProjectIdToLarkProjectLink(dom_merge_request_title);
+      if (result[0]) {
+        dom_merge_request_title.innerHTML = result[1];
+        const link = dom_merge_request_title.querySelector(".lark-project-link");
+        bindPopoverEvent(link);
+        hasReplaced = true;
+      }
+    }
+
+    if (hasReplaced) {
       nodeMap.set(dom_merge_request_title, true);
-      dom_merge_request_title.innerHTML = result[1];
-      const link = dom_merge_request_title.querySelector(".lark-project-link");
-      bindPopoverEvent(link);
     }
   }
 }
