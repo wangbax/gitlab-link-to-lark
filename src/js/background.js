@@ -229,10 +229,32 @@ const getLarkProjectInfoByPrefetchList = (text) => {
 
 // 类型缓存：记录每个 tid 对应的实际类型
 const typeCache = new Map();
+// App 缓存：记录每个 tid 对应的有效 app
+const appCache = new Map();
 
 async function getLarkProjectInfo({ tid, app }) {
   const [prefix, id] = tid.split("-");
   const prefixLower = prefix.toLowerCase();
+
+  // 处理多个 app 的情况
+  const apps = app.split(',').map(a => a.trim()).filter(a => a);
+  let validApp = app;
+  
+  // 如果配置了多个 app，尝试找到有效的那个
+  if (apps.length > 1) {
+    // 先检查缓存
+    if (appCache.has(tid)) {
+      validApp = appCache.get(tid);
+    } else {
+      // 尝试找到有效的 app
+      validApp = await findValidApp(apps, id, tid, prefixLower);
+      if (validApp) {
+        appCache.set(tid, validApp);
+      } else {
+        validApp = apps[0]; // 如果都失败了，使用第一个
+      }
+    }
+  }
 
   // 快速路径：保持向后兼容
   let type = "story";
@@ -246,11 +268,11 @@ async function getLarkProjectInfo({ tid, app }) {
     if (typeCache.has(tid)) {
       type = typeCache.get(tid);
     } else {
-      type = await detectProjectType(app, id, tid);
+      type = await detectProjectType(validApp, id, tid);
     }
   }
 
-  let url = `${LARK_DOMAIN_HOST}/${app}/${type}/detail/${id}`;
+  let url = `${LARK_DOMAIN_HOST}/${validApp}/${type}/detail/${id}`;
   const res = await fetch(url);
   const text = await res.text();
   let info = { tid, actualType: type };
@@ -268,6 +290,47 @@ async function getLarkProjectInfo({ tid, app }) {
     };
   }
   return info;
+}
+
+// 查找有效的 app：依次尝试每个 app，直到找到有效的
+async function findValidApp(apps, id, tid, prefixLower) {
+  // 根据前缀猜测类型，优化尝试顺序
+  let typesToTry = ['story', 'issue'];
+  
+  if (prefixLower === 'm') {
+    typesToTry = ['story'];
+  } else if (prefixLower === 'f') {
+    typesToTry = ['issue'];
+  }
+
+  // 依次尝试每个 app
+  for (const app of apps) {
+    for (const type of typesToTry) {
+      try {
+        let url = `${LARK_DOMAIN_HOST}/${app}/${type}/detail/${id}`;
+        const res = await fetch(url);
+        const text = await res.text();
+
+        const detailInfo = getLarkProjectInfoByDetail(text, type, id);
+        if (detailInfo.data) {
+          // 找到了有效的 app，同时缓存类型
+          typeCache.set(tid, type);
+          return app;
+        }
+
+        const prefetchListInfo = getLarkProjectInfoByPrefetchList(text);
+        if (prefetchListInfo.data) {
+          typeCache.set(tid, type);
+          return app;
+        }
+      } catch (e) {
+        // 继续尝试下一个
+        continue;
+      }
+    }
+  }
+
+  return null;
 }
 
 // 动态检测项目类型：先尝试 story，失败后尝试 issue

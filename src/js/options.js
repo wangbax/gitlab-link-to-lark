@@ -27,6 +27,9 @@ function main() {
       if (!data.domain) {
         return toggleError("请输入 Gitlab 地址");
       }
+      if (app && !/^[a-zA-Z0-9]+(,[a-zA-Z0-9]+)*$/.test(app.trim())) {
+        return toggleError("飞书命名空间格式不正确，请使用字母、数字，多个命名空间用逗号分隔");
+      }
       if (prefixes && !/^[a-zA-Z0-9]+(,[a-zA-Z0-9]+)*$/.test(prefixes.trim())) {
         return toggleError("项目 ID 前缀格式不正确，请使用字母、数字，多个前缀用逗号分隔");
       }
